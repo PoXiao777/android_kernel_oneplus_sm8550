@@ -108,6 +108,7 @@
 #define PWR_EVNT_LPM_OUT_L1_MASK		BIT(13)
 
 #define EXTRA_INP_SS_DISABLE	BIT(5)
+#define DWC_EXTRA_INPUT_6_HUB_PORT_OVERCURRENT_U2	BIT(1)
 
 #ifdef OPLUS_FEATURE_CHG_BASIC
 #define USB3_PRI_LINK_REGS_LLUCTL(n)	(0xd024 + ((n) * 0x80))
@@ -611,6 +612,8 @@ struct dwc3_msm {
 	bool			dynamic_disable;
 	bool			wcd_usbss;
 	bool			force_disconnect;
+
+	struct gpio_desc	*oc_gpiod;
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -4527,6 +4530,41 @@ static irqreturn_t msm_dwc3_pwr_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t oc_irq_handler_thread(int irq, void *_mdwc)
+{
+	struct dwc3 *dwc = NULL;
+	struct dwc3_msm *mdwc = _mdwc;
+
+	if (mdwc->dwc3)
+		dwc =  platform_get_drvdata(mdwc->dwc3);
+
+	if (!mdwc->in_host_mode || !dwc || !dwc->xhci)
+		return IRQ_NONE;
+
+	dev_err(mdwc->dev, "OCP IRQ %d\n", gpiod_get_value_cansleep(mdwc->oc_gpiod));
+
+	pm_runtime_resume(&dwc->xhci->dev);
+
+	/**
+	 *
+	 * When OverCurrent condition happens, set OVERCURRENT_U2 bit of
+	 * EXTRA_INP_REG qscratch register to let xHC set OCA and OCC bit
+	 * of PORTSC register. Subsequently, XHC will clear PORT_POWER on HS
+	 * port and disable it.
+	 * When OverCurrent condition no longer exists, clear OVERCURRENT_U2.
+	 *
+	 **/
+
+	if (gpiod_get_value_cansleep(mdwc->oc_gpiod))
+		dwc3_msm_write_reg_field(mdwc->base, EXTRA_INP_REG,
+			DWC_EXTRA_INPUT_6_HUB_PORT_OVERCURRENT_U2, 1);
+	else
+		dwc3_msm_write_reg_field(mdwc->base, EXTRA_INP_REG,
+			DWC_EXTRA_INPUT_6_HUB_PORT_OVERCURRENT_U2, 0);
+
+	return IRQ_HANDLED;
+}
+
 static void dwc3_otg_sm_work(struct work_struct *w);
 
 static int dwc3_msm_get_clk_gdsc(struct dwc3_msm *mdwc)
@@ -5553,6 +5591,7 @@ static int dwc3_msm_core_init(struct dwc3_msm *mdwc)
 {
 	struct device_node *node = mdwc->dev->of_node, *dwc3_node;
 	struct dwc3	*dwc;
+	int oc_irq;
 	int ret = 0;
 
 	if (mdwc->dwc3)
@@ -5661,6 +5700,35 @@ static int dwc3_msm_core_init(struct dwc3_msm *mdwc)
 	dwc3_msm_notify_event(dwc, DWC3_GSI_EVT_BUF_ALLOC, 0);
 	pm_runtime_set_autosuspend_delay(dwc->dev, 0);
 	pm_runtime_allow(dwc->dev);
+
+	mdwc->oc_gpiod = devm_gpiod_get_optional(mdwc->dev, "oc", GPIOD_IN);
+	if (IS_ERR(mdwc->oc_gpiod)) {
+		ret = PTR_ERR(mdwc->oc_gpiod);
+		dev_err(mdwc->dev, "Error %d extracting OC gpio\n", ret);
+		goto err;
+	}
+
+	if (mdwc->oc_gpiod) {
+		oc_irq = gpiod_to_irq(mdwc->oc_gpiod);
+		if (oc_irq < 0) {
+			ret = oc_irq;
+			dev_err(mdwc->dev, "Error %d extracting OC IRQ\n",
+								ret);
+			goto err;
+		}
+
+		ret = devm_request_threaded_irq(mdwc->dev, oc_irq, NULL,
+						oc_irq_handler_thread,
+						IRQF_TRIGGER_RISING |
+						IRQF_TRIGGER_FALLING |
+						IRQF_ONESHOT,
+						"usb_oc_irq", mdwc);
+		if (ret < 0) {
+			dev_err(mdwc->dev, "Error %d registering OC irq\n",
+								ret);
+			goto err;
+		}
+	}
 
 	return 0;
 
