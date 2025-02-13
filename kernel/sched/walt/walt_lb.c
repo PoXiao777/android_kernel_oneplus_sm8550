@@ -710,9 +710,7 @@ void walt_lb_tick(struct rq *rq)
 	walt_cfs_tick(rq);
 
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_ABNORMAL_FLAG)
-	ret = get_ux_state_type(p);
-	if (ret != UX_STATE_INHERIT && ret != UX_STATE_SCHED_ASSIST)
-		test_task_overload(p);
+	test_task_overload(p);
 #endif /* #OPLUS_FEATURE_ABNORMAL_FLAG */
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
 	if (!rq->misfit_task_load && !need_up_migrate)

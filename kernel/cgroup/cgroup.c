@@ -5239,6 +5239,11 @@ static void css_release_work_fn(struct work_struct *work)
 
 	mutex_lock(&cgroup_mutex);
 
+	if (css->flags & CSS_RELEASED) {
+		mutex_unlock(&cgroup_mutex);
+		return;
+	}
+
 	css->flags |= CSS_RELEASED;
 	list_del_rcu(&css->sibling);
 
