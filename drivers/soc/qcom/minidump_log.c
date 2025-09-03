@@ -156,6 +156,11 @@ char *md_dma_buf_info_addr;
 size_t md_dma_buf_procs_size = SZ_256K;
 char *md_dma_buf_procs_addr;
 
+#ifdef CONFIG_QCOM_MINIDUMP_PANIC_KTASK_STACK
+#define MD_KTASK_STACK_PAGES	768
+static struct seq_buf *md_ktask_stack_buf;
+#endif
+
 /* Modules information */
 #ifdef CONFIG_MODULES
 #define MD_MODULE_PAGES	  8
@@ -167,6 +172,9 @@ static char *key_modules[10];
 module_param_array(key_modules, charp, &n_modump, 0644);
 #endif	/* CONFIG_MODULES */
 #endif
+
+/* #ifdef OPLUS_FEATURE_DFR */
+static bool current_stack_enable = false;
 
 static int register_stack_entry(struct md_region *ksp_entry, u64 sp, u64 size)
 {
@@ -268,11 +276,17 @@ void dump_stack_minidump(u64 sp)
 	struct vm_struct *stack_vm_area;
 	unsigned int i, copy_pages;
 
-	if (IS_ENABLED(CONFIG_QCOM_DYN_MINIDUMP_STACK))
+	if (current_stack_enable == true) {
+		pr_err("CONFIG_QCOM_DYN_MINIDUMP_STACK is enabled, returning.\n");
 		return;
+	}
 
-	if (is_idle_task(current))
+
+	if (is_idle_task(current)) {
+		pr_err("CPU %d current (stack_vm_area=%px, stack=%px, stack_refcount=%d) is idle, returning.\n",
+			cpu, current->stack_vm_area, current->stack, refcount_read(&current->stack_refcount));
 		return;
+	}
 
 	is_vmap_stack = IS_ENABLED(CONFIG_VMAP_STACK);
 
@@ -288,20 +302,30 @@ void dump_stack_minidump(u64 sp)
 	 * address of one page of the stack.
 	 */
 	stack_vm_area = task_stack_vm_area(current);
-	if (is_vmap_stack) {
-		sp &= ~(PAGE_SIZE - 1);
-		copy_pages = calculate_copy_pages(sp, stack_vm_area);
-		for (i = 0; i < copy_pages; i++) {
-			scnprintf(ksp_entry.name, sizeof(ksp_entry.name),
-				  "KSTACK%d_%d", cpu, i);
-			(void)register_stack_entry(&ksp_entry, sp, PAGE_SIZE);
-			sp += PAGE_SIZE;
+	if (stack_vm_area) {
+		if (is_vmap_stack) {
+			sp &= ~(PAGE_SIZE - 1);
+			copy_pages = calculate_copy_pages(sp, stack_vm_area);
+			if (copy_pages > 0) {
+				for (i = 0; i < copy_pages; i++) {
+					scnprintf(ksp_entry.name, sizeof(ksp_entry.name),
+						  "KSTACK%d_%d", cpu, i);
+					(void)register_stack_entry(&ksp_entry, sp, PAGE_SIZE);
+					sp += PAGE_SIZE;
+				}
+			} else {
+				pr_err("CPU %d current (comm=%s, pid=%d) sp (0x%llx) not in range (0x%llx, +0x%llx), returning.\n",
+					cpu, current->comm, current->pid, sp, (u64)stack_vm_area->addr, get_vm_area_size(stack_vm_area));
+			}
+		} else {
+			sp &= ~(THREAD_SIZE - 1);
+			scnprintf(ksp_entry.name, sizeof(ksp_entry.name), "KSTACK%d",
+				  cpu);
+			(void)register_stack_entry(&ksp_entry, sp, THREAD_SIZE);
 		}
 	} else {
-		sp &= ~(THREAD_SIZE - 1);
-		scnprintf(ksp_entry.name, sizeof(ksp_entry.name), "KSTACK%d",
-			  cpu);
-		(void)register_stack_entry(&ksp_entry, sp, THREAD_SIZE);
+		pr_err("CPU %d current (comm=%s, pid=%d, stack=%px, stack_refcount=%d) stack_vm_area is 0, returning.\n",
+			cpu, current->comm, current->pid, current->stack, refcount_read(&current->stack_refcount));
 	}
 
 	scnprintf(ktsk_entry.name, sizeof(ktsk_entry.name), "KTASK%d", cpu);
@@ -1101,7 +1125,40 @@ static void md_ipi_stop(void *unused, struct pt_regs *regs)
 	unsigned int cpu = smp_processor_id();
 
 	per_cpu(regs_before_stop, cpu) = *regs;
+	dump_stack_minidump(regs->sp);
 }
+#endif
+
+#ifdef CONFIG_QCOM_MINIDUMP_PANIC_KTASK_STACK
+static bool dump_trace(void *arg, unsigned long where)
+{
+	seq_buf_printf(md_ktask_stack_buf, "%pSb\n", (void *)where);
+	return true;
+}
+
+static void md_dump_ktask_stack(void)
+{
+	struct task_struct *g, *t;
+	unsigned int state;
+
+	if (!md_ktask_stack_buf)
+		return;
+
+	for_each_process_thread(g, t) {
+		state = READ_ONCE(t->__state);
+		if ((state & TASK_UNINTERRUPTIBLE) && !(state & TASK_WAKEKILL)
+					&& !(state & TASK_NOLOAD))
+			seq_buf_printf(md_ktask_stack_buf,
+					"Task blocked for %ld seconds!",
+					(jiffies - t->last_switch_time) / HZ);
+		seq_buf_printf(md_ktask_stack_buf, "%d [%s]\n",
+				task_pid_nr(t), t->comm);
+		arch_stack_walk(dump_trace, NULL, t, NULL);
+		seq_buf_printf(md_ktask_stack_buf, "\n");
+	}
+	seq_buf_printf(md_ktask_stack_buf, "---ktask stack end---\n");
+}
+
 #endif
 
 void md_dump_process(void)
@@ -1120,6 +1177,9 @@ void md_dump_process(void)
 dump_rq:
 #endif
 	md_dump_runqueues();
+#ifdef CONFIG_QCOM_MINIDUMP_PANIC_KTASK_STACK
+	md_dump_ktask_stack();
+#endif
 	if (md_meminfo_seq_buf)
 		md_dump_meminfo(md_meminfo_seq_buf);
 
@@ -1141,6 +1201,8 @@ dump_rq:
 		md_dma_buf_info(md_dma_buf_info_addr, md_dma_buf_info_size);
 	if (md_dma_buf_procs_addr)
 		md_dma_buf_procs(md_dma_buf_procs_addr, md_dma_buf_procs_size);
+	dump_stack_minidump(0);
+
 	md_in_oops_handler = false;
 }
 EXPORT_SYMBOL(md_dump_process);
@@ -1220,6 +1282,10 @@ static void md_register_panic_data(void)
 	md_register_panic_entries(MD_CPU_CNTXT_PAGES, "KCNTXT",
 				  &md_cntxt_seq_buf);
 	register_trace_android_vh_ipi_stop(md_ipi_stop, NULL);
+#endif
+#ifdef CONFIG_QCOM_MINIDUMP_PANIC_KTASK_STACK
+	md_register_panic_entries(MD_KTASK_STACK_PAGES, "KTASK_STACK",
+				  &md_ktask_stack_buf);
 #endif
 	md_register_panic_entries(MD_MEMINFO_PAGES, "MEMINFO",
 				  &md_meminfo_seq_buf);
@@ -1456,8 +1522,6 @@ static void register_pstore_info(void)
 }
 #endif
 
-/* #ifdef OPLUS_FEATURE_DFR */
-static bool current_stack_enable = false;
 static void unregister_vmapped_stack(struct md_region *mdr)
 {
 	int i;
