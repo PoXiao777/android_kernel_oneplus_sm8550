@@ -200,6 +200,12 @@ void f2fs_abort_atomic_write(struct inode *inode, bool clean)
 	clear_inode_flag(inode, FI_ATOMIC_FILE);
 	if (is_inode_flag_set(inode, FI_ATOMIC_DIRTIED)) {
 		clear_inode_flag(inode, FI_ATOMIC_DIRTIED);
+		/*
+		 * The vfs inode keeps clean during commit, but the f2fs inode
+		 * doesn't. So clear the dirty state after commit and let
+		 * f2fs_mark_inode_dirty_sync ensure a consistent dirty state.
+		 */
+		f2fs_inode_synced(inode);
 		f2fs_mark_inode_dirty_sync(inode, true);
 	}
 	stat_dec_atomic_inode(inode);
@@ -2305,8 +2311,7 @@ void f2fs_invalidate_blocks(struct f2fs_sb_info *sbi, block_t addr)
 	if (addr == NEW_ADDR || addr == COMPRESS_ADDR)
 		return;
 
-	invalidate_mapping_pages(META_MAPPING(sbi), addr, addr);
-	f2fs_invalidate_compress_page(sbi, addr);
+	f2fs_invalidate_internal_cache(sbi, addr);
 
 	/* add it into sit main buffer */
 	down_write(&sit_i->sentry_lock);
@@ -3539,11 +3544,8 @@ reallocate:
 			f2fs_del_fsync_node_entry(fio->sbi, fio->page);
 		goto out;
 	}
-	if (GET_SEGNO(fio->sbi, fio->old_blkaddr) != NULL_SEGNO) {
-		invalidate_mapping_pages(META_MAPPING(fio->sbi),
-					fio->old_blkaddr, fio->old_blkaddr);
-		f2fs_invalidate_compress_page(fio->sbi, fio->old_blkaddr);
-	}
+	if (GET_SEGNO(fio->sbi, fio->old_blkaddr) != NULL_SEGNO)
+		f2fs_invalidate_internal_cache(fio->sbi, fio->old_blkaddr);
 
 	/* writeout dirty page into bdev */
 	f2fs_submit_page_write(fio);
@@ -3636,8 +3638,7 @@ int f2fs_inplace_write_data(struct f2fs_io_info *fio)
 	}
 
 	if (fio->meta_gc)
-		invalidate_mapping_pages(META_MAPPING(sbi),
-				fio->new_blkaddr, fio->new_blkaddr);
+		f2fs_truncate_meta_inode_pages(sbi, fio->new_blkaddr, 1);
 
 	stat_inc_inplace_blocks(fio->sbi);
 
@@ -3738,9 +3739,7 @@ void f2fs_do_replace_block(struct f2fs_sb_info *sbi, struct f2fs_summary *sum,
 		update_sit_entry(sbi, new_blkaddr, 1);
 	}
 	if (GET_SEGNO(sbi, old_blkaddr) != NULL_SEGNO) {
-		invalidate_mapping_pages(META_MAPPING(sbi),
-					old_blkaddr, old_blkaddr);
-		f2fs_invalidate_compress_page(sbi, old_blkaddr);
+		f2fs_invalidate_internal_cache(sbi, old_blkaddr);
 		if (!from_gc)
 			update_segment_mtime(sbi, old_blkaddr, 0);
 		update_sit_entry(sbi, old_blkaddr, -1);
@@ -3831,7 +3830,7 @@ void f2fs_wait_on_block_writeback_range(struct inode *inode, block_t blkaddr,
 	for (i = 0; i < len; i++)
 		f2fs_wait_on_block_writeback(inode, blkaddr + i);
 
-	invalidate_mapping_pages(META_MAPPING(sbi), blkaddr, blkaddr + len - 1);
+	f2fs_truncate_meta_inode_pages(sbi, blkaddr, len);
 }
 
 static int read_compacted_summaries(struct f2fs_sb_info *sbi)
@@ -5406,7 +5405,15 @@ int __init f2fs_create_segment_manager_caches(void)
 			sizeof(struct revoke_entry));
 	if (!revoke_entry_slab)
 		goto destroy_sit_entry_set;
+#ifdef CONFIG_F2FS_FS_DEDUP
+	if (create_page_info_slab())
+		goto destroy_revoke_page_entry;
+#endif
 	return 0;
+#ifdef CONFIG_F2FS_FS_DEDUP
+destroy_revoke_page_entry:
+	kmem_cache_destroy(revoke_entry_slab);
+#endif
 
 destroy_sit_entry_set:
 	kmem_cache_destroy(sit_entry_set_slab);
@@ -5424,4 +5431,7 @@ void f2fs_destroy_segment_manager_caches(void)
 	kmem_cache_destroy(discard_cmd_slab);
 	kmem_cache_destroy(discard_entry_slab);
 	kmem_cache_destroy(revoke_entry_slab);
+#ifdef CONFIG_F2FS_FS_DEDUP
+	destroy_page_info_slab();
+#endif
 }
