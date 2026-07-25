@@ -623,6 +623,7 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 	dump_stack();
 	add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
 
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
 	if (page) {
 		int i;
 		struct page *sub_page;
@@ -644,6 +645,7 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 			}
 		}
 	}
+#endif
 }
 
 /*
