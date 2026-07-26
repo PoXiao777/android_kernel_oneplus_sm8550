@@ -421,7 +421,7 @@ static int sleepmon_send_ssr_command(void)
 
 #ifdef OPLUS_ARCH_EXTENDS
 //function triggering adsp reset
-static void oplus_lpm_adsp_panic()
+static void oplus_lpm_adsp_panic(void)
 {
 	struct timeval tv;
 	long long current_time = 0, period_time = 0;

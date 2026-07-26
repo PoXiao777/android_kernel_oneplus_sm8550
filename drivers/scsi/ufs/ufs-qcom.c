@@ -3798,7 +3798,7 @@ void ufs_compl_cmd_handle(void *data, struct ufs_hba *hba, struct ufshcd_lrb *lr
 EXPORT_SYMBOL_GPL(ufs_compl_cmd_handle);
 
 static int
-oplus_ufs_regist_tracepoint()
+oplus_ufs_regist_tracepoint(void)
 {
 	int rc;
 	printk("oplus ufs trace point init");

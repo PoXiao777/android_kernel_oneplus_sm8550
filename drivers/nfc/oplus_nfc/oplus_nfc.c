@@ -23,7 +23,7 @@
 static char current_chipset[32];
 static bool support_nfc = false;
 
-bool is_nfc_support()
+bool is_nfc_support(void)
 {
 	return support_nfc;
 }
@@ -200,4 +200,3 @@ module_exit(oplus_nfc_exit);
 
 MODULE_DESCRIPTION("OPLUS nfc chipset version");
 MODULE_LICENSE("GPL v2");
-
