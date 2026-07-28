@@ -50,7 +50,7 @@ static void ssg_blkcg_cpd_init(struct blkcg_policy_data *cpd)
 	if (IS_ERR_OR_NULL(ssg_blkcg))
 		return;
 
-	ssg_blkcg->max_available_ratio = 100;
+	ssg_blkcg->max_available_ratio = 50;
 }
 
 static void ssg_blkcg_cpd_free(struct blkcg_policy_data *cpd)
@@ -119,19 +119,18 @@ unsigned int ssg_blkcg_shallow_depth(struct request_queue *q)
 {
 	struct blkcg_gq *blkg;
 	struct ssg_blkg *ssg_blkg;
+	unsigned int shallow_depth = 0;
 
 	rcu_read_lock();
 	blkg = blkg_lookup(css_to_blkcg(blkcg_css()), q);
 	ssg_blkg = BLKG_TO_SSG_BLKG(blkg);
+	if (!IS_ERR_OR_NULL(ssg_blkg) &&
+	    atomic_read(&ssg_blkg->current_rqs) >=
+			ssg_blkg->max_available_rqs)
+		shallow_depth = ssg_blkg->shallow_depth;
 	rcu_read_unlock();
 
-	if (IS_ERR_OR_NULL(ssg_blkg))
-		return 0;
-
-	if (atomic_read(&ssg_blkg->current_rqs) < ssg_blkg->max_available_rqs)
-		return 0;
-
-	return ssg_blkg->shallow_depth;
+	return shallow_depth;
 }
 
 void ssg_blkcg_depth_updated(struct blk_mq_hw_ctx *hctx)

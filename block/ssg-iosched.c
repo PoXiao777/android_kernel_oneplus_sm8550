@@ -43,10 +43,10 @@ extern void blk_sec_stats_account_io_done(
 
 #define MAX_ASYNC_WRITE_RQS	8
 
-static const int read_expire = HZ / 2;		/* max time before a read is submitted. */
-static const int write_expire = 5 * HZ;		/* ditto for writes, these limits are SOFT! */
+static const int read_expire = HZ / 10;		/* 100 ms for flash. */
+static const int write_expire = HZ / 2;		/* 500 ms soft limit for flash. */
 static const int max_write_starvation = 2;	/* max times reads can starve a write */
-static const int congestion_threshold = 90;	/* percentage of congestion threshold */
+static const int congestion_threshold = 85;	/* percentage of congestion threshold */
 static const int max_tgroup_io_ratio = 50;	/* maximum service ratio for each thread group */
 static const int max_async_write_ratio = 25;	/* maximum service ratio for async write */
 
@@ -161,8 +161,7 @@ static inline void set_thread_group_info(struct ssg_request_info *rqi)
 	struct task_struct *gleader = current->group_leader;
 
 	rqi->tgid = task_tgid_nr(gleader);
-	strncpy(rqi->tg_name, gleader->comm, TASK_COMM_LEN - 1);
-	rqi->tg_name[TASK_COMM_LEN - 1] = '\0';
+	get_task_comm(rqi->tg_name, gleader);
 	rqi->tg_start_time = gleader->start_time;
 }
 
@@ -744,6 +743,9 @@ static void ssg_prepare_request(struct request *rq)
 {
 	struct ssg_data *ssg = rq->q->elevator->elevator_data;
 	struct ssg_request_info *rqi;
+#if IS_ENABLED(CONFIG_MQ_IOSCHED_SSG_CGROUP)
+	struct blkcg_gq *blkg;
+#endif
 
 	atomic_inc(&ssg->allocated_rqs);
 
@@ -751,10 +753,19 @@ static void ssg_prepare_request(struct request *rq)
 	if (likely(rqi)) {
 		set_thread_group_info(rqi);
 
+#if IS_ENABLED(CONFIG_MQ_IOSCHED_SSG_CGROUP)
 		rcu_read_lock();
-		rqi->blkg = blkg_lookup(css_to_blkcg(blkcg_css()), rq->q);
-		ssg_blkcg_inc_rq(rqi->blkg);
+		blkg = blkg_lookup(css_to_blkcg(blkcg_css()), rq->q);
+		if (blkg_tryget(blkg)) {
+			rqi->blkg = blkg;
+			ssg_blkcg_inc_rq(blkg);
+		} else {
+			rqi->blkg = NULL;
+		}
 		rcu_read_unlock();
+#else
+		rqi->blkg = NULL;
+#endif
 	}
 
 	if (ssg_op_is_async_write(rq->cmd_flags))
@@ -799,8 +810,11 @@ static void ssg_finish_request(struct request *rq)
 	rqi = ssg_rq_info(ssg, rq);
 	if (likely(rqi)) {
 		clear_thread_group_info(rqi);
-		ssg_blkcg_dec_rq(rqi->blkg);
-		rqi->blkg = NULL;
+		if (rqi->blkg) {
+			ssg_blkcg_dec_rq(rqi->blkg);
+			blkg_put(rqi->blkg);
+			rqi->blkg = NULL;
+		}
 	}
 
 	if (ssg_op_is_async_write(rq->cmd_flags))
@@ -824,11 +838,9 @@ static ssize_t ssg_var_show(int var, char *page)
 	return sprintf(page, "%d\n", var);
 }
 
-static void ssg_var_store(int *var, const char *page)
+static int ssg_var_store(int *var, const char *page)
 {
-	char *p = (char *) page;
-
-	*var = simple_strtol(p, &p, 10);
+	return kstrtoint(page, 10, var);
 }
 
 #define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
@@ -853,7 +865,9 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 {									\
 	struct ssg_data *ssg = e->elevator_data;			\
 	int __data;							\
-	ssg_var_store(&__data, (page));					\
+	int __ret = ssg_var_store(&__data, (page));			\
+	if (__ret)							\
+		return __ret;						\
 	if (__data < (MIN))						\
 		__data = (MIN);						\
 	else if (__data > (MAX))					\
