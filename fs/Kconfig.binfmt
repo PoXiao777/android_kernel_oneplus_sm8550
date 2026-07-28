@@ -203,9 +203,8 @@ config BINFMT_CHP_X86_64
 	default n
 	help
 	  This handler intercepts x86_64 ELF executables and redirects them
-	  to /exa64 with predefined options, avoiding the userspace /arg
-	  wrapper. Say Y if you want to run x86_64 apps via ExaGear
-	  without an additional userspace process.
+	  through a configured translation environment. Say M to build it as
+	  a module and run x86_64 applications with configurable options.
 
 config COREDUMP
 	bool "Enable core dump support" if EXPERT
